@@ -1,0 +1,12 @@
+data/
+samples/*
+!samples/README.md
+published/
+learned_rules.json
+learned_rules.md
+author_sentences.txt
+style_profile.json
+judge.enabled
+__pycache__/
+*.pyc
+.env
