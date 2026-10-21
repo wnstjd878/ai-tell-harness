@@ -83,7 +83,9 @@ MODELS = {"sonnet": os.environ.get("AI_TELL_MODEL_JUDGE") or "sonnet",     # 판
 
 JUDGE_MIN_SENT = 12             # 이보다 짧은 글은 판정에 안 건다
 CHUNK = 7000                    # 한 번에 읽히는 글자 수
-MAX_CHUNKS = 3
+MAX_CHUNKS = 3                  # 고쳐 쓰기에 앞뒤 맥락으로 싣는 조각 수
+JUDGE_MAX_CHUNKS = 40           # 판정은 끝까지 읽는다(28만 자). 조각은 4개씩 동시에 부른다
+JUDGE_WORKERS = 4
 BLOCK_GRADES = ("C", "D")
 PROSE_EXT = re.compile(r"\.(md|mdx|txt|html?)$", re.I)
 SNAP_MAX_BYTES = 600_000
@@ -103,6 +105,9 @@ JUDGE_PROMPT = """아래 [글]에서 AI 가 쓴 티가 나는 문장을 찾아�
 
 [문법 층 규칙 (참고용. 위 본인 글에도 나오는 꼴이면 잡지 않는다)]
 {rules}
+
+[한 번만 나와도 '강'으로 칠 꼴 (im-not-ai 분류표의 S1. 글쓴이 습관과 겹치는 꼴은 s1_skip.txt 로 뺀다)]
+{s1}
 
 [이 글쓴이의 글에 나올 수 없는 표현]
 1. 만든 말·추상 명사: 자리, 값, 변수, 묶음, 칸, 축, 쌍, 창, 걸음, 무기, 시험대, 장치를 뜻이 흐린 채로 쓴 곳. 사전에도 업계에도 없는 조어.
@@ -407,11 +412,46 @@ def keep_block() -> str:
     return "\n".join("- " + l.strip().lstrip("-").strip() for l in t.splitlines() if l.strip())
 
 
+TAXONOMY = Path(os.environ.get("AI_TELL_TAXONOMY") or QUICK_RULES.with_name("ai-tell-taxonomy.md"))
+S1_SKIP_TXT = ROOT / "s1_skip.txt"
+# im-not-ai 분류표의 S1(한 번만 나와도 AI) 가운데 기본으로 빼는 것.
+#   A-16 대명사: im-not-ai 실측에서 사람이 2~3배 더 써서 그쪽도 빠른 규칙에서 뺐다.
+# 내 글에 자주 나오는 S1 꼴(예: C-8 "A가 아니라 B" 대구)이 있으면 s1_skip.txt 에 번호를 한 줄씩 적는다.
+S1_SKIP_DEFAULT = {"A-16"}
+# 분류표 본문이 문턱을 따로 둔 항목. 사람 글도 연결어미 쉼표를 문장의 15% 정도 쓴다.
+S1_NOTE = {"C-11": "한 글에 6번 넘게 몰려 있을 때만 강. 그 아래는 잡지 않는다"}
+_S1_HEAD = re.compile(r"^###\s+([A-J]-\d+)\.\s+(.+?)\s+\[S1\]", re.M)
+_S1_QUICK = re.compile(r"quick_pattern:\s*([^·_]+)")
+
+
+def s1_skip() -> set:
+    return S1_SKIP_DEFAULT | {ln.strip() for ln in _lines_of(S1_SKIP_TXT, "").splitlines() if ln.strip()}
+
+
+def s1_block() -> str:
+    """분류표에서 S1 항목을 그때그때 읽는다(rules/ai-tell-taxonomy.md). 없으면 이 칸은 비운다."""
+    try:
+        tx = TAXONOMY.read_text(encoding="utf-8")
+    except Exception:
+        return "(분류표 없음)"
+    skip, lines = s1_skip(), []
+    heads = list(_S1_HEAD.finditer(tx))
+    for i, m in enumerate(heads):
+        pid, title = m.group(1), m.group(2)
+        if pid in skip:
+            continue
+        body = tx[m.end():heads[i + 1].start() if i + 1 < len(heads) else m.end() + 4000]
+        q = _S1_QUICK.search(body)
+        lines.append(f"- {pid} {title}" + (f" (기준: {q.group(1).strip()[:120]})" if q else "")
+                     + (f" [{S1_NOTE[pid]}]" if pid in S1_NOTE else ""))
+    return NL.join(lines) or "(없음)"
+
+
 def build_prompt(text: str, learned: list | None = None, exclude: str = "") -> str:
     esc = lambda s: s.replace("{", "{{").replace("}", "}}")
     return JUDGE_PROMPT.format(profile=esc(_lines_of(PROFILE_TXT, DEFAULT_PROFILE)),
                                ref=esc(reference(text, exclude)), rules=esc(quick_rules() or "(규칙 파일 없음)"),
-                               learned=esc(learned_block(learned)), keep=esc(keep_block()), text=esc(text))
+                               s1=esc(s1_block()), learned=esc(learned_block(learned)), keep=esc(keep_block()), text=esc(text))
 
 
 # ── claude 호출 ──────────────────────────────────────────────
@@ -499,7 +539,10 @@ def _chunks(text: str) -> tuple[list, bool]:
         cur += para
     if cur.strip():
         parts.append(cur)
-    return parts[:MAX_CHUNKS], len(parts) > MAX_CHUNKS
+    # 나눈 조각을 이으면 원문과 글자 하나 다르지 않아야 한다(im-not-ai reassemble_chunks 와 같은 확인)
+    if sha("".join(parts)) != sha(text):
+        raise RuntimeError("글 나누기에서 글자가 빠짐")
+    return parts[:JUDGE_MAX_CHUNKS], len(parts) > JUDGE_MAX_CHUNKS
 
 
 def _squash(s: str) -> str:
@@ -526,8 +569,15 @@ def judge(text: str, role: str = "sonnet", learned: list | None = None, timeout:
     parts, truncated = _chunks(text)
     flat = _squash(text)
     reasons, suspects, metas = [], [], []
-    for part in parts:
-        out, meta = call_claude(build_prompt(part, learned, exclude), role=role, timeout=timeout)
+    def _one(part):
+        return call_claude(build_prompt(part, learned, exclude), role=role, timeout=timeout)
+    if len(parts) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(min(JUDGE_WORKERS, len(parts))) as ex:
+            answers = list(ex.map(_one, parts))
+    else:
+        answers = [_one(parts[0])]
+    for out, meta in answers:
         d = json_in(out)
         if not d or not isinstance(d.get("suspects"), list):
             raise RuntimeError(f"판정 답을 못 읽음: {out[:160]}")
@@ -548,7 +598,7 @@ def judge(text: str, role: str = "sonnet", learned: list | None = None, timeout:
     grade, per = grade_of(strong, read_chars)
     return {"grade": grade, "raw_grade": grade, "strong": strong, "weak": len(suspects) - strong, "per1k": per,
             "reason": " / ".join(r for r in reasons if r)[:300],
-            "suspects": suspects[:14], "chunks": len(parts), "truncated": truncated, "chars": read_chars,
+            "suspects": suspects[:max(14, 6 * len(parts))], "chunks": len(parts), "truncated": truncated, "chars": read_chars,
             "model": metas[0]["model"] if metas else "", "ms": sum(m["ms"] for m in metas),
             "tokens_in": sum(m["in"] for m in metas), "rules_ver": rules_version()}
 
@@ -657,13 +707,31 @@ def rewrite(text: str, verdict: dict, only_strong: bool = False, role: str = "op
         f = got.get(it["n"])
         it["after"] = None if f is None else (str(f.get("after") or "").strip() or None)
         it["merge"] = "" if f is None else str(f.get("merge") or "")
+    _safety(items)
     return items
+
+
+def _safety(items: list) -> None:
+    """고친 문장마다 숫자·인용·서법·쉼표 검사(ai_tell_safety, im-not-ai 검사기). 고친 안은 지우지 않고
+    safe=False 와 사유를 붙인다(사람에게 보여 줄 땐 같이 보이고, 자동으로 넣을 땐 safe 인 것만 넣는다)."""
+    try:
+        import ai_tell_safety as S
+    except Exception:  # noqa: BLE001
+        return
+    for it in items:
+        if not it.get("after"):
+            continue
+        r = S.guard(it["before"], it["after"], scope="sentence")
+        it["after"] = r["text"]
+        it["safe"] = r["ok"]
+        if r["fails"]:
+            it["safety"] = r["fails"]
 
 
 def report(v: dict) -> str:
     lines = [f"AI 티 판정: {v.get('grade')}등급 (확실한 의심 {v.get('strong', 0)}곳, 1,000자당 {v.get('per1k', 0)}). {v.get('reason', '')}"]
     if v.get("truncated"):
-        lines.append(f"(글이 길어 앞 {MAX_CHUNKS * CHUNK}자만 읽었습니다)")
+        lines.append(f"(글이 길어 앞 {JUDGE_MAX_CHUNKS * CHUNK:,}자만 읽었습니다)")
     for s in v.get("suspects") or []:
         lines.append(f'- ({s["level"]}) [{s["rule"]}] "{s["quote"]}" : {s["why"]} → {s["fix"]}')
     return "\n".join(lines)
@@ -675,6 +743,8 @@ def report_fixes(fixes: list) -> str:
         lines.append(f'{it["n"]}. ({it["level"]}) {it["before"]}')
         tag = {"앞": " (앞 문장과 이어 씀)", "뒤": " (뒤 문장과 이어 씀)", "함께": " (원문 앞에 더할 문장)"}.get(it.get("merge") or "", "")
         lines.append(f'   → {it.get("after") or "(고친 문장을 못 받음)"}{tag}')
+        if it.get("safety"):
+            lines.append(f'   (고친 글 검사에 걸림, 자동으로 넣지 마세요: {"; ".join(it["safety"])[:160]})')
     return "\n".join(lines)
 
 
@@ -1069,7 +1139,7 @@ def main() -> int:
             print(f"(표본이 없습니다. {SAMPLES} 에 내가 쓴 글을 넣으면 그 글이 기준이 됩니다)", file=sys.stderr)
         v = judge(text)
         if "--rewrite" in sys.argv:
-            v["fixes"] = [{k: it[k] for k in ("n", "level", "rule", "why", "before", "after", "merge")}
+            v["fixes"] = [{k: it.get(k) for k in ("n", "level", "rule", "why", "before", "after", "merge", "safe", "safety")}
                           for it in rewrite(text, v)]
         if "--json" in sys.argv:
             print(json.dumps(v, ensure_ascii=False, indent=1))

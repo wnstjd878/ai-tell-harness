@@ -1,0 +1,22 @@
+name: test
+on:
+  push:
+  pull_request:
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: im-not-ai 받기 (고친 글 검사와 S1 목록이 쓴다)
+        run: git clone --depth 1 https://github.com/epoko77-ai/im-not-ai.git "$RUNNER_TEMP/im-not-ai"
+      - run: pip install pytest
+      - run: python -m py_compile *.py
+      - run: pytest -q tests
+        env:
+          IM_NOT_AI: ${{ runner.temp }}/im-not-ai

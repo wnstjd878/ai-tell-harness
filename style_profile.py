@@ -89,7 +89,26 @@ def bands(ref: dict) -> dict:
     return out
 
 
+# 어긋난 항목을 몇 개로 칠지. 서로 따라 움직이는 항목은 한 묶음으로 센다(im-not-ai metrics.py 의 '쉼표 계열 최대 3점'과 같은 생각).
+# 16자 이하와 25자 이하는 같은 토막 문장을 두 번 센다.
+POINT_GROUP = {"short16": "short", "short25": "short"}
+MIN_POINTS = 2  # 1개만 어긋나도 막으면 만든 사람의 블로그 글 86편 중 9편이 막혔다(2개면 0편). AI 글은 18편 중 9편 → 6편만 잡히고,
+                # 빠진 것은 뒤에 붙은 읽는 판정(ai_tell_judge)이 맡는다.
+
+
+def points(hits: list[str]) -> int:
+    keys = {h.split("=")[0].replace("지문 ", "") for h in hits}
+    return len({POINT_GROUP.get(k, k) for k in keys})
+
+
 def score(text: str) -> list[str]:
+    """막을 만큼 어긋났을 때만 항목을 돌려준다(묶음으로 센 수가 MIN_POINTS 이상)."""
+    hits = score_all(text)
+    return hits if points(hits) >= MIN_POINTS else []
+
+
+def score_all(text: str) -> list[str]:
+    """어긋난 항목 전부(막을지와 무관). 보고용."""
     fp = fingerprint(text)
     if fp.get("n", 0) < MIN_SENTENCES:
         return []
