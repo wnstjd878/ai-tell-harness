@@ -559,6 +559,33 @@ def _squash(s: str) -> str:
 GRADE_CUTS = (("D", 2.0, 3), ("C", 0.9, 2), ("B", 0.4, 1))  # (등급, 1,000자당 강 의심 수, 최소 강 의심 수)
 
 
+# 학습 규칙에 tail_only=true 가 붙은 것은 글 마지막 15% 안에서 짚힌 문장만 '강'으로 센다. 그 앞은 '약'으로 내려 보여 주기만 한다.
+# 2026-10-21 첨삭: 경구(L28)는 사람도 AI 도 쓴다. AI 글은 강 경구 24개 중 18개가 글 마지막 15% 안(글을 닫는 한 줄),
+# 사람 블로그는 14개 중 4개뿐(중간에 주장을 던지고 풀어 감). 이 기준으로 사람 오판 7/43 → 4/43, AI 적중 16 → 15/18(계산).
+TAIL_START = 0.85
+
+
+def tail_only_ids() -> set:
+    return {f"L{r['id']}" for r in learned_rules() if r.get("tail_only")}
+
+
+def _rel_pos(text: str, quote: str) -> float:
+    flat = re.sub(r"\s+", "", text)
+    k = re.sub(r"\s+", "", quote)[:25]
+    i = flat.find(k) if k else -1
+    return i / max(len(flat), 1) if i >= 0 else 1.0   # 못 찾으면 끝에 있다고 본다(덜 봐주는 쪽)
+
+
+def _tail_only(text: str, suspects: list) -> None:
+    ids = tail_only_ids()
+    if not ids:
+        return
+    for s in suspects:
+        if s["level"] == "강" and s["rule"].strip() in ids and _rel_pos(text, s["quote"]) < TAIL_START:
+            s["level"] = "약"
+            s["why"] = (s["why"] + " (글 중간 경구라 등급에는 세지 않음)")[:200]
+
+
 def grade_of(strong: int, chars: int) -> tuple[str, float]:
     per = strong / max(chars / 1000.0, 1.0)
     for g, cut, need in GRADE_CUTS:
@@ -595,6 +622,7 @@ def judge(text: str, role: str = "sonnet", learned: list | None = None, timeout:
                 suspects.append({"level": "강" if "강" in str(s.get("level") or "") else "약",
                                  "rule": str(s.get("rule") or ""), "quote": q[:80],
                                  "why": str(s.get("why") or "")[:160], "fix": str(s.get("fix") or "")[:160]})
+    _tail_only(text, suspects)
     suspects.sort(key=lambda s: s["level"] != "강")
     strong = sum(1 for s in suspects if s["level"] == "강")
     read_chars = sum(len(p) for p in parts)

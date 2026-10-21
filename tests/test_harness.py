@@ -95,3 +95,12 @@ def test_s1_keeps_repeat_condition(monkeypatch):
     monkeypatch.setattr(J, "TAXONOMY", IM / "skills" / "humanize-korean" / "references" / "ai-tell-taxonomy.md")
     c8 = [ln for ln in J.s1_block().splitlines() if ln.startswith("- C-8 ")]
     assert c8 and "2회+" in c8[0]
+
+
+def test_tail_only_rule_counts_only_at_the_end(monkeypatch):
+    monkeypatch.setattr(J, "tail_only_ids", lambda: {"L1"})
+    text = "앞 문단 경구다. " + "가" * 900 + " 끝 경구다."
+    sus = [{"level": "강", "rule": "L1", "quote": "앞 문단 경구다.", "why": ""},
+           {"level": "강", "rule": "L1", "quote": "끝 경구다.", "why": ""}]
+    J._tail_only(text, sus)
+    assert [s["level"] for s in sus] == ["약", "강"]
