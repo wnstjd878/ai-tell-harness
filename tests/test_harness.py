@@ -66,3 +66,32 @@ def test_s1_block_reads_taxonomy(monkeypatch):
 def test_prompt_has_all_slots():
     p = J.build_prompt("시험 글입니다.")
     assert "시험 글입니다." in p and "한 번만 나와도" in p
+
+
+# ── 코덱스 검수(2026-10-21)에서 나온 경우 ──
+def test_chunks_keep_trailing_blank_lines():
+    text = "가" * 7000 + "\n\n"
+    parts, _ = J._chunks(text)
+    assert "".join(parts) == text
+
+
+def test_safety_fallback_rejects_new_number(tmp_path):
+    code = ("import ai_tell_safety as S; r = S.guard('광고비를 줄였습니다.', '광고비를 30% 줄였습니다.', scope='sentence');"
+            "print(r['ok'])")
+    env = dict(os.environ, IM_NOT_AI=str(tmp_path / "none"))
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env,
+                         cwd=str(Path(__file__).resolve().parent.parent)).stdout.strip()
+    assert out == "False"
+
+
+@pytest.mark.skipif(not HAS_IM, reason="im-not-ai 가 없음")
+def test_safety_rejects_unrestored_modality():
+    r = S.guard("광고비를 줄이려면 먼저 소재부터 바꿔야 한다.", "소재를 먼저 손보면 광고비가 준다.", scope="sentence")
+    assert not r["ok"] and any("modality_lost" in f for f in r["fails"])
+
+
+@pytest.mark.skipif(not HAS_IM, reason="im-not-ai 가 없음")
+def test_s1_keeps_repeat_condition(monkeypatch):
+    monkeypatch.setattr(J, "TAXONOMY", IM / "skills" / "humanize-korean" / "references" / "ai-tell-taxonomy.md")
+    c8 = [ln for ln in J.s1_block().splitlines() if ln.startswith("- C-8 ")]
+    assert c8 and "2회+" in c8[0]

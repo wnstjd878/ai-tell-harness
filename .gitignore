@@ -10,3 +10,4 @@ judge.enabled
 __pycache__/
 *.pyc
 .env
+.codex-review/

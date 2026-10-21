@@ -421,7 +421,8 @@ S1_SKIP_DEFAULT = {"A-16"}
 # 분류표 본문이 문턱을 따로 둔 항목. 사람 글도 연결어미 쉼표를 문장의 15% 정도 쓴다.
 S1_NOTE = {"C-11": "한 글에 6번 넘게 몰려 있을 때만 강. 그 아래는 잡지 않는다"}
 _S1_HEAD = re.compile(r"^###\s+([A-J]-\d+)\.\s+(.+?)\s+\[S1\]", re.M)
-_S1_QUICK = re.compile(r"quick_pattern:\s*([^·_]+)")
+# quick_pattern 값 안에도 가운뎃점(·)이 있어 " · quick_fix:" 앞까지 통째로 읽는다(코덱스 검수: C-8 의 "2회+" 조건이 잘렸다)
+_S1_QUICK = re.compile(r"quick_pattern:\s*(.+?)\s*·\s*quick_fix:")
 
 
 def s1_skip() -> set:
@@ -442,7 +443,7 @@ def s1_block() -> str:
             continue
         body = tx[m.end():heads[i + 1].start() if i + 1 < len(heads) else m.end() + 4000]
         q = _S1_QUICK.search(body)
-        lines.append(f"- {pid} {title}" + (f" (기준: {q.group(1).strip()[:120]})" if q else "")
+        lines.append(f"- {pid} {title}" + (f" (기준: {q.group(1).strip()[:200]})" if q else "")
                      + (f" [{S1_NOTE[pid]}]" if pid in S1_NOTE else ""))
     return NL.join(lines) or "(없음)"
 
@@ -537,8 +538,10 @@ def _chunks(text: str) -> tuple[list, bool]:
             parts.append(para[:CHUNK])
             para = para[CHUNK:]
         cur += para
-    if cur.strip():
+    if cur.strip() or (cur and not parts):
         parts.append(cur)
+    elif cur:
+        parts[-1] += cur   # 끝에 남은 빈 줄은 앞 조각에 붙인다(버리면 원문과 글자 수가 어긋난다)
     # 나눈 조각을 이으면 원문과 글자 하나 다르지 않아야 한다(im-not-ai reassemble_chunks 와 같은 확인)
     if sha("".join(parts)) != sha(text):
         raise RuntimeError("글 나누기에서 글자가 빠짐")

@@ -75,8 +75,14 @@ def _numbers(text: str) -> set:
 
 
 def _fallback_fails(before: str, after: str) -> list:
+    out = []
+    new = sorted(_numbers(after) - _numbers(before))
+    if new:
+        out.append(f"[number_injected] 원문에 없던 숫자: {', '.join(new[:6])}")
     lost = sorted(_numbers(before) - _numbers(after))
-    return [f"[number_dropped] 원문 숫자가 사라짐: {', '.join(lost[:6])}"] if lost else []
+    if lost:
+        out.append(f"[number_dropped] 원문 숫자가 사라짐: {', '.join(lost[:6])}")
+    return out
 
 
 def _rate(before: str, after: str) -> float:
@@ -95,6 +101,7 @@ def guard(before: str, after: str, scope: str = "doc") -> dict:
     after = after or ""
     e = _load()
     fixes: dict = {}
+    pre_fails: list = []
     text = after
     if not text.strip():
         return {"ok": False, "text": after, "rate": 1.0, "fails": ["[empty_output] 고친 글이 비어 있음"],
@@ -109,13 +116,16 @@ def guard(before: str, after: str, scope: str = "doc") -> dict:
         if scope != "redo":   # 통째로 다시 쓴 글은 문장 짝이 안 맞아 원문 문장을 끼워 넣으면 글이 섞인다
             try:
                 with redirect_stdout(io.StringIO()):
-                    text, restored, _skipped = e["rm"].restore(before, text)
+                    text, restored, skipped = e["rm"].restore(before, text)
                 if restored:
                     fixes["modality_restored"] = len(restored)
+                if skipped:   # 되돌리지 못한 당위·추측 표현 손실은 그대로 두면 뜻이 바뀐다(코덱스 검수 2026-10-21)
+                    lost_mod = [f"{x.get('before', '')[:30]}" for x in skipped]
+                    pre_fails = [f"[modality_lost] 당위·추측 표현이 사라졌는데 되돌리지 못함: {', '.join(lost_mod[:3])}"]
             except Exception as ex:  # noqa: BLE001
                 fixes["modality_error"] = str(ex)[:120]
         try:
-            fails = [str(f) for f in e["checks"].run_checks(before, text)]
+            fails = [str(f) for f in e["checks"].run_checks(before, text)] + pre_fails
         except Exception as ex:  # noqa: BLE001
             fails = _fallback_fails(before, text)
             fixes["checks_error"] = str(ex)[:120]
