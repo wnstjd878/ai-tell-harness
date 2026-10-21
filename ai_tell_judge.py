@@ -594,7 +594,9 @@ def grade_of(strong: int, chars: int) -> tuple[str, float]:
     return "A", round(per, 2)
 
 
-def judge(text: str, role: str = "sonnet", learned: list | None = None, timeout: int = 150, exclude: str = "") -> dict:
+# 2026-10-21: 기본 모델 sonnet → opus. 같은 61편 시험에서 사람 글 오판 평균 5.3 → 2.5(42편 중), AI 적중 13.7 → 15.5(18편 중),
+# 같은 글을 두 번 판정해 같은 문장을 짚는 비율 32% → 44%. 슈퍼리뷰(sr_drafts)는 role="sonnet" 을 따로 준다.
+def judge(text: str, role: str = "opus", learned: list | None = None, timeout: int = 150, exclude: str = "") -> dict:
     """글을 읽고 의심 문장을 짚게 한 뒤 등급을 매긴다. 실패하면 예외."""
     parts, truncated = _chunks(text)
     flat = _squash(text)
